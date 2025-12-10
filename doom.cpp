@@ -9,7 +9,13 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <windows.h>
-
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <list>
+#include "json.hpp"
+using json = nlohmann::json;
 
 
 
@@ -29,18 +35,23 @@ Image texture_brick;
 struct Wall {
     float x1, y1, x2, y2;
 	Image* texture;
+    Wall(float x1N, float y1N, float x2N, float y2N, Image* img) {
+        x1 = x1N;
+        y1 = y1N;
+        x2 = x2N;
+        y2 = y2N;
+        texture = img;
+    }
+    Wall() {}
 };;
 
 struct Sector {
-    Wall* walls;
-    int wallCount;
+    std::vector<Wall> walls;
     Sector() {
-        walls = new Wall[4];
-        walls[0] = { 100,100,200,100, nullptr };
-        walls[1] = { 200,100,200,200, nullptr };
-        walls[2] = { 200,200,100,200, nullptr };
-        walls[3] = { 100,200,100,100, nullptr };
-        wallCount = 4;
+        walls.push_back(Wall(100, 100, 200, 100, nullptr));
+        walls.push_back(Wall(200, 100, 200, 200, nullptr));
+        walls.push_back(Wall(200, 200, 100, 200, nullptr));
+        walls.push_back(Wall(100, 200, 100, 100, nullptr));
     }
 };
 
@@ -62,8 +73,10 @@ WCHAR szTitle[MAX_LOADSTRING];
 WCHAR szWindowClass[MAX_LOADSTRING];
 int width = 320;
 int height = 200;
+bool ctrlRPrev = false;
 int frame = 0;
-Sector* map = new Sector[1];
+std::unordered_map<std::string, Image> textures;
+std::vector<Sector> map = {Sector()};
 uint32_t* framebuffer = nullptr;
 BITMAPINFO bmi;
 Player player = { 150.0f, 150.0f, 0.0f };
@@ -169,6 +182,19 @@ Image LoadBMP(const char* filename)
     return img;
 }
 
+std::string readFileToString(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open file " << filename << std::endl;
+        return ""; // Return an empty string or handle the error appropriately
+    }
+
+    std::stringstream buffer;
+    buffer << file.rdbuf(); // Read the entire file buffer into the stringstream
+    file.close();
+    return buffer.str(); // Get the string from the stringstream
+}
+
 void DrawLine(int x0, int y0, int x1, int y1, uint32_t color)
 {
     int dx = abs(x1 - x0);
@@ -220,13 +246,47 @@ void calcRoom(const Sector& sector, float rayAngle)
                  player.x + cosf(rayAngle) * maxDist,
                  player.y + sinf(rayAngle) * maxDist,
                  nullptr };
-    for (int i = 0; i < sector.wallCount; ++i) {
+    for (int i = 0; i < sector.walls.size(); ++i) {
         lineIntersection li = linelineintersection(ray, sector.walls[i]);
         if (li.intersect) intersectList.push_back(li);
     }
 }
 
 
+void reloadMap() {
+    std::ifstream file("map.json");
+    json j;
+    file >> j;
+
+    map.clear();
+
+    for (int i = 0;i < j.size();i++) {
+        json v = j[i];
+        int wallCount = v["walls"].size();
+        std::vector<Wall> walls = {};
+        for (const auto& wallJ : v["walls"]) {
+            std::string textureName = wallJ["texture"];
+            if (textures.find(textureName) == textures.end())
+                textures[textureName] = LoadBMP(textureName.c_str());
+
+            auto positions = wallJ["positions"];
+            Wall wall{
+                positions[0],
+                positions[1],
+                positions[2],
+                positions[3],
+                &textures[textureName]
+            };
+            walls.push_back(wall);
+        }
+        Sector sector = Sector();
+        sector.walls = walls;
+        map.push_back(sector);
+    }
+
+
+    //std::cout << name << "\n";
+}
 //
 //  FUNCTION: MyRegisterClass()
 //
@@ -272,14 +332,19 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
     if (!texture_brick.pixels)
         MessageBoxA(0, "Failed to load BMP! \"textures/bricks.bmp\", cotinueing witout", "Error", 0);
 
+    AllocConsole();
+
+    FILE* f;
+    freopen_s(&f, "CONOUT$", "w", stdout);
+
 
 
     // assign the brick texture to all walls (example)
-    for (int i = 0; i < map[0].wallCount; ++i) {
+    for (int i = 0; i < map[0].walls.size(); ++i) {
         map[0].walls[i].texture = &texture_brick;
     }
 
-    RECT rc = { 0, 0, width, height };
+    RECT rc = { 0, 0, width*2, height*2 };
     AdjustWindowRect(&rc, WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
 
     HWND hWnd = CreateWindowW(
@@ -306,6 +371,8 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
     SetTimer(hWnd, 1, 16, NULL);
+
+    
     return TRUE;
 }
 
@@ -342,28 +409,40 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_TIMER:
     {
         frame++;
-        if (GetAsyncKeyState(VK_LEFT) & 0x8000) player.angle -= 0.04f;
-        if (GetAsyncKeyState(VK_RIGHT) & 0x8000) player.angle += 0.04f;
 
-        float speed = 2.5f;
-        // typical forward/back: add cos/sin for forward
-        if (GetAsyncKeyState('W') & 0x8000) {
-            player.x += cosf(player.angle) * speed;
-            player.y += sinf(player.angle) * speed;
-        }
-        if (GetAsyncKeyState('S') & 0x8000) {
-            player.x -= cosf(player.angle) * speed;
-            player.y -= sinf(player.angle) * speed;
-        }
-        if (GetAsyncKeyState('A') & 0x8000) {
-            player.x += cosf(player.angle + (PI_F / 2.0f)) * speed;
-            player.y += sinf(player.angle + (PI_F / 2.0f)) * speed;
-        }
-        if (GetAsyncKeyState('D') & 0x8000) {
-            player.x -= cosf(player.angle + (PI_F / 2.0f)) * speed;
-            player.y -= sinf(player.angle + (PI_F / 2.0f)) * speed;
-        }
+        HWND focusedWindow = GetFocus();
+        if (focusedWindow) {
 
+            if (GetAsyncKeyState(VK_LEFT) & 0x8000) player.angle -= 0.04f;
+            if (GetAsyncKeyState(VK_RIGHT) & 0x8000) player.angle += 0.04f;
+
+            float speed = 2.5f;
+            // typical forward/back: add cos/sin for forward
+            if (GetAsyncKeyState('W') & 0x8000) {
+                player.x -= cosf(player.angle) * speed;
+                player.y -= sinf(player.angle) * speed;
+            }
+            if (GetAsyncKeyState('S') & 0x8000) {
+                player.x += cosf(player.angle) * speed;
+                player.y += sinf(player.angle) * speed;
+            }
+            if (GetAsyncKeyState('A') & 0x8000) {
+                player.x += cosf(player.angle + (PI_F / 2.0f)) * speed;
+                player.y += sinf(player.angle + (PI_F / 2.0f)) * speed;
+            }
+            if (GetAsyncKeyState('D') & 0x8000) {
+                player.x -= cosf(player.angle + (PI_F / 2.0f)) * speed;
+                player.y -= sinf(player.angle + (PI_F / 2.0f)) * speed;
+            }
+            bool ctrlRNow =
+                (GetAsyncKeyState(VK_CONTROL) & 0x8000) &&
+                (GetAsyncKeyState('R') & 0x8000);
+
+            if (ctrlRNow && !ctrlRPrev) {
+                reloadMap(); // fires once
+            }
+            ctrlRPrev = ctrlRNow;
+        }
         ClearFrame(0xFF202020);
 
         const float FOV = PI_F / 2.0f;
@@ -399,8 +478,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
                 int drawStart = -lineHeight / 2 + height / 2;
                 int drawEnd = lineHeight / 2 + height / 2;
-                if (drawStart < 0) drawStart = 0;
-                if (drawEnd >= height) drawEnd = height - 1;
+              //  if (drawStart < 0) drawStart = 0;
+              //  if (drawEnd >= height) drawEnd = height - 1;
                 int columnHeight = drawEnd - drawStart;
                 if (columnHeight <= 0) columnHeight = 1;
 
