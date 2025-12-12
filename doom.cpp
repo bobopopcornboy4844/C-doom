@@ -23,19 +23,20 @@ using json = nlohmann::json;
 
 #define MAX_LOADSTRING 100
 //structures
-struct Image {
+struct Texture {
     int w;
     int h;
     uint32_t* pixels;
-    Image() : w(0), h(0), pixels(nullptr) {}
+    Texture() : w(0), h(0), pixels(nullptr) {}
 };
-Image texture_notfound;
-Image texture_brick;
+Texture texture_notfound;
+Texture texture_brick;
 
 struct Wall {
     float x1, y1, x2, y2;
-	Image* texture;
-    Wall(float x1N, float y1N, float x2N, float y2N, Image* img) {
+    float tileX;
+	Texture* texture;
+    Wall(float x1N, float y1N, float x2N, float y2N, Texture* img) {
         x1 = x1N;
         y1 = y1N;
         x2 = x2N;
@@ -59,8 +60,9 @@ struct lineIntersection {
     bool intersect;
     float t, u;
     float x, y;
-    Image* texture;
-    lineIntersection() : intersect(false), t(0), u(0), x(0), y(0), texture(nullptr) {}
+    Texture* texture;
+    Wall* wall;
+    lineIntersection() : intersect(false), t(0), u(0), x(0), y(0), wall(new Wall()), texture(nullptr) {}
 };
 
 struct Player {
@@ -73,10 +75,11 @@ WCHAR szTitle[MAX_LOADSTRING];
 WCHAR szWindowClass[MAX_LOADSTRING];
 int width = 320;
 int height = 200;
+int currentSector = 0;
 bool ctrlRPrev = false;
 int frame = 0;
-std::unordered_map<std::string, Image> textures;
-std::vector<Sector> map = {Sector()};
+std::unordered_map<std::string, Texture> textures;
+std::vector<Sector> map;
 uint32_t* framebuffer = nullptr;
 BITMAPINFO bmi;
 Player player = { 150.0f, 150.0f, 0.0f };
@@ -139,9 +142,9 @@ void DrawPixel(int x, int y, uint32_t color)
     framebuffer[y * width + x] = color;
 }
 
-Image LoadBMP(const char* filename)
+Texture LoadBMP(const char* filename)
 {
-    Image img;
+    Texture img;
     FILE* f = nullptr;
     if (fopen_s(&f, filename, "rb") != 0 || !f) return img;
 
@@ -220,20 +223,36 @@ void ClearFrame(uint32_t color = 0xFF000000) // default opaque black
 static lineIntersection linelineintersection(Wall ray, Wall wall)
 {
     lineIntersection li;
-    float rx = ray.x2 - ray.x1;
-    float ry = ray.y2 - ray.y1;
-    float sx = wall.x2 - wall.x1;
-    float sy = wall.y2 - wall.y1;
-    float bottom = rx * sy - ry * sx;
-    if (fabs(bottom) < EPS) { li.intersect = false; return li; }
-    float t = ((ray.x1 - wall.x1) * sy - (ray.y1 - wall.y1) * sx) / bottom;
-    float u = ((ray.x1 - wall.x1) * ry - (ray.y1 - wall.y1) * rx) / bottom;
+    
+    float x1 = ray.x1;
+    float y1 = ray.y1;
+    float x2 = ray.x2;
+    float y2 = ray.y2;
+    float x3 = wall.x1;
+    float y3 = wall.y1;
+    float x4 = wall.x2;
+    float y4 = wall.y2;
+
+    float bottom = (x1-x2)*(y3-y4) - (y1-y2)*(x3-x4);
+    if (fabs(bottom) < EPS*2) {
+        li.intersect = false;
+        return li;
+    }
+
+    float t = ((x1-x3)*(y3-y4) - (y1-y3)*(x3-x4)) / bottom;
+    float u = ((x1-x2)*(y1-y3) - (y1-y2)*(x1-x3)) / bottom;
+    u = -u;
+
     li.t = t;
     li.u = u;
-    li.intersect = (t >= 0.0f && u >= 0.0f && u <= 1.0f);
-    li.x = ray.x1 + t * rx;
-    li.y = ray.y1 + t * ry;
+
+    // Segment vs segment check
+    li.intersect = (t >= 0.0f && t <= 1.0f) && (u >= 0.0f && u <= 1.0f);
+
+    li.x = ray.x1 + t * (x2-x1);
+    li.y = ray.y1 + t * (y2-y1);
     li.texture = wall.texture;
+    li.wall = &wall;
     return li;
 }
 
@@ -253,15 +272,26 @@ void calcRoom(const Sector& sector, float rayAngle)
 }
 
 
-void reloadMap() {
+int reloadMap() {
     std::ifstream file("map.json");
     json j;
     file >> j;
+    if (!j.contains("playerSpawn")) {
+        std::cout << "attribute \"playerSpawn\" with a type of array was not found\n";
+        return 1;
+    }
+    if (!j["playerSpawn"].is_array()) {
+        std::cout << "attribute \"playerSpawn\" with a type of array was not found\n";
+        return 1;
+    }
+    std::cout << j;
 
     map.clear();
+    player.x = j["playerSpawn"][0];
+    player.y = j["playerSpawn"][1];
 
     for (int i = 0;i < j.size();i++) {
-        json v = j[i];
+        json v = j["sectors"][i];
         int wallCount = v["walls"].size();
         std::vector<Wall> walls = {};
         for (const auto& wallJ : v["walls"]) {
@@ -269,14 +299,15 @@ void reloadMap() {
             if (textures.find(textureName) == textures.end())
                 textures[textureName] = LoadBMP(textureName.c_str());
 
-            auto positions = wallJ["positions"];
+            std::vector<int> positions = wallJ["positions"].get<std::vector<int>>();
             Wall wall{
-                positions[0],
-                positions[1],
-                positions[2],
-                positions[3],
+                static_cast<float>(positions[0]),
+                static_cast<float>(positions[1]),
+                static_cast<float>(positions[2]),
+                static_cast<float>(positions[3]),
                 &textures[textureName]
             };
+            wall.tileX = wallJ["tileX"];
             walls.push_back(wall);
         }
         Sector sector = Sector();
@@ -284,7 +315,7 @@ void reloadMap() {
         map.push_back(sector);
     }
 
-
+    return 0;
     //std::cout << name << "\n";
 }
 //
@@ -337,13 +368,6 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
     FILE* f;
     freopen_s(&f, "CONOUT$", "w", stdout);
 
-
-
-    // assign the brick texture to all walls (example)
-    for (int i = 0; i < map[0].walls.size(); ++i) {
-        map[0].walls[i].texture = &texture_brick;
-    }
-
     RECT rc = { 0, 0, width*2, height*2 };
     AdjustWindowRect(&rc, WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
 
@@ -357,7 +381,7 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 
     if (!hWnd) return FALSE;
 
-
+    reloadMap();
 
     framebuffer = new uint32_t[width * height];
     ZeroMemory(&bmi, sizeof(bmi));
@@ -419,31 +443,34 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             float speed = 2.5f;
             // typical forward/back: add cos/sin for forward
             if (GetAsyncKeyState('W') & 0x8000) {
-                player.x -= cosf(player.angle) * speed;
-                player.y -= sinf(player.angle) * speed;
-            }
-            if (GetAsyncKeyState('S') & 0x8000) {
                 player.x += cosf(player.angle) * speed;
                 player.y += sinf(player.angle) * speed;
             }
-            if (GetAsyncKeyState('A') & 0x8000) {
-                player.x += cosf(player.angle + (PI_F / 2.0f)) * speed;
-                player.y += sinf(player.angle + (PI_F / 2.0f)) * speed;
+            if (GetAsyncKeyState('S') & 0x8000) {
+                player.x -= cosf(player.angle) * speed;
+                player.y -= sinf(player.angle) * speed;
             }
-            if (GetAsyncKeyState('D') & 0x8000) {
+            if (GetAsyncKeyState('A') & 0x8000) {
                 player.x -= cosf(player.angle + (PI_F / 2.0f)) * speed;
                 player.y -= sinf(player.angle + (PI_F / 2.0f)) * speed;
+            }
+            if (GetAsyncKeyState('D') & 0x8000) {
+                player.x += cosf(player.angle + (PI_F / 2.0f)) * speed;
+                player.y += sinf(player.angle + (PI_F / 2.0f)) * speed;
             }
             bool ctrlRNow =
                 (GetAsyncKeyState(VK_CONTROL) & 0x8000) &&
                 (GetAsyncKeyState('R') & 0x8000);
 
             if (ctrlRNow && !ctrlRPrev) {
-                reloadMap(); // fires once
+                reloadMap(); // fires 
             }
             ctrlRPrev = ctrlRNow;
         }
         ClearFrame(0xFF202020);
+        if (map.size() < 1) {
+            break;
+        }
 
         const float FOV = PI_F / 2.0f;
         const float halfFOV = FOV * 0.5f;
@@ -453,15 +480,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             float angleOffset = (sx - 0.5f) * FOV;
             float rayAngle = player.angle + angleOffset;
 
-            calcRoom(map[0], rayAngle);
+            calcRoom(map[currentSector], rayAngle);
 
             float closestT = INFINITY;
             float closestU = 0.0f;
-            Image* tex = &texture_notfound;
+            Wall* closestWall = new Wall();
+            Texture* tex = &texture_notfound;
             for (size_t i = 0; i < intersectList.size(); ++i) {
                 if (intersectList[i].t < closestT) {
                     closestT = intersectList[i].t;
                     closestU = intersectList[i].u;
+                    closestWall = intersectList[i].wall;
                     if (intersectList[i].texture) tex = intersectList[i].texture;
                 }
             }
@@ -483,7 +512,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 int columnHeight = drawEnd - drawStart;
                 if (columnHeight <= 0) columnHeight = 1;
 
-                int texX = (int)(closestU * (tex->w - 1));
+                float per = closestU * closestWall->tileX;
+                per = per * tex->w;
+                per = fmodf(per,tex->w);
+                int texX = (int)(per);
+                //int texX = (int)(closestU * (tex->w + 1));
                 if (texX < 0) texX = 0;
                 if (texX >= tex->w) texX = tex->w - 1;
 
@@ -495,6 +528,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         if (texY >= tex->h) texY = tex->h - 1;
 
                         uint32_t sample = tex->pixels[texY * tex->w + texX];
+						//sample = 0xFF000000; // ensure opaque
                         DrawPixel(x, y, sample);
                     }
                 }
